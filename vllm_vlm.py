@@ -47,20 +47,49 @@ class VLLMWrapper:
 
         print(f"Initialized vLLM wrapper at {self.base_url} with model: {model}")
 
+    def _resize_image(self, image: Image.Image, max_size: int = 512) -> Image.Image:
+        """Resize image if it exceeds max_size while maintaining aspect ratio."""
+        width, height = image.size
+        if width <= max_size and height <= max_size:
+            return image
+
+        if width > height:
+            new_width = max_size
+            new_height = int(height * max_size / width)
+        else:
+            new_height = max_size
+            new_width = int(width * max_size / height)
+
+        return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
     def _encode_image(self, image_source) -> str:
-        """Encode an image to base64."""
+        """Encode an image to base64, resizing if necessary."""
         if isinstance(image_source, str):
-            with open(image_source, "rb") as f:
-                image_bytes = f.read()
-        elif isinstance(image_source, Image.Image):
+            # Load image from path and resize
+            image = Image.open(image_source)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image = self._resize_image(image)
             buffer = io.BytesIO()
-            # Convert to RGB if necessary
+            image.save(buffer, format="JPEG", quality=85)
+            image_bytes = buffer.getvalue()
+        elif isinstance(image_source, Image.Image):
+            # Convert to RGB and resize if necessary
             if image_source.mode != "RGB":
                 image_source = image_source.convert("RGB")
+            image_source = self._resize_image(image_source)
+            buffer = io.BytesIO()
             image_source.save(buffer, format="JPEG", quality=85)
             image_bytes = buffer.getvalue()
         elif isinstance(image_source, bytes):
-            image_bytes = image_source
+            # Load bytes, resize, and re-encode
+            image = Image.open(io.BytesIO(image_source))
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image = self._resize_image(image)
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=85)
+            image_bytes = buffer.getvalue()
         else:
             raise ValueError(f"Unsupported image source type: {type(image_source)}")
 
@@ -105,11 +134,11 @@ class VLLMWrapper:
 
         messages = []
 
+        # Combine system prompt with question for models that don't support
+        # separate system messages with multimodal content (e.g., InternVL3)
+        full_question = question
         if system_prompt:
-            messages.append({
-                "role": "system",
-                "content": system_prompt
-            })
+            full_question = f"{system_prompt}\n\n{question}"
 
         messages.append({
             "role": "user",
@@ -122,7 +151,7 @@ class VLLMWrapper:
                 },
                 {
                     "type": "text",
-                    "text": question
+                    "text": full_question
                 }
             ]
         })
@@ -138,7 +167,7 @@ class VLLMWrapper:
             response = requests.post(
                 self.api_url,
                 json=payload,
-                timeout=120,
+                timeout=300,  # 5 minutes for slow first requests / warmup
             )
             response.raise_for_status()
 

@@ -31,6 +31,8 @@ from vqa_dataset import load_vqa_dataset, create_mock_dataset
 from vlm_wrapper import InternVLWrapper
 from openrouter_vlm import OpenRouterVLM
 from vllm_vlm import VLLMWrapper
+from vqa_agent import VQAAgentWrapper
+from vqa_react_agent import VQAReActAgentWrapper
 
 
 def parse_args():
@@ -80,6 +82,22 @@ def parse_args():
         type=str,
         default="Qwen/Qwen2.5-VL-7B-Instruct",
         help="Model name for vLLM server",
+    )
+    parser.add_argument(
+        "--use_agent",
+        action="store_true",
+        help="Use agentic VQA with tool calling (crop, zoom, etc.)",
+    )
+    parser.add_argument(
+        "--max_tool_calls",
+        type=int,
+        default=3,
+        help="Maximum tool calls per question when using agent mode",
+    )
+    parser.add_argument(
+        "--agent_verbose",
+        action="store_true",
+        help="Print agent reasoning steps",
     )
 
     # Dataset configuration
@@ -144,7 +162,7 @@ def parse_args():
     parser.add_argument(
         "--seed_prompt",
         type=str,
-        default="Answer the question about the image using a single word or phrase.",
+        default=None,  # Will be set based on mode
         help="Initial system prompt to optimize from",
     )
 
@@ -190,7 +208,19 @@ def main():
     if args.use_vllm:
         print(f"   Using vLLM server at: {args.vllm_url}")
         print(f"   Model: {args.vllm_model}")
-        vlm = VLLMWrapper(base_url=args.vllm_url, model=args.vllm_model)
+
+        if args.use_agent:
+            print(f"   Mode: AGENTIC (ReAct-style with tool calling)")
+            print(f"   Max tool calls: {args.max_tool_calls}")
+            vlm = VQAReActAgentWrapper(
+                base_url=args.vllm_url,
+                model=args.vllm_model,
+                max_tool_calls=args.max_tool_calls,
+                verbose=args.agent_verbose,
+            )
+        else:
+            print(f"   Mode: Direct (no tool calling)")
+            vlm = VLLMWrapper(base_url=args.vllm_url, model=args.vllm_model)
 
         # Set reflection LM to use same vLLM server if not specified
         if args.reflection_lm is None:
@@ -244,9 +274,25 @@ def main():
     print(f"   Training samples: {len(trainset)}")
     print(f"   Validation samples: {len(valset)}")
 
-    # Create adapter
-    print("\n3. Creating VQA adapter...")
-    adapter = VQAAdapter(vlm=vlm)
+    # Set default seed prompt based on mode
+    if args.seed_prompt is None:
+        if args.use_vllm and args.use_agent:
+            args.seed_prompt = """Answer document questions accurately. You have tools available:
+- Use CROP(x1,y1,x2,y2) to focus on specific regions like tables or small text
+- Use ZOOM(quadrant) to examine a quarter of the document
+- Use ANSWER(response) when you have the answer
+
+For questions about specific values in tables, crop the relevant area first. Be concise in your final answer."""
+        else:
+            args.seed_prompt = "Answer the question about the image using a single word or phrase."
+
+    # Create adapter with multimodal reflection
+    print("\n3. Creating VQA adapter with multimodal reflection...")
+    is_agentic = args.use_vllm and args.use_agent
+    adapter = VQAAdapter(vlm=vlm, reflection_vlm=vlm, is_agentic=is_agentic)
+    print("   Reflection will use VLM with images for better prompt optimization")
+    if is_agentic:
+        print("   Reflection knows about tool capabilities (CROP, ZOOM, etc.)")
 
     # Define seed candidate
     seed_candidate = {
